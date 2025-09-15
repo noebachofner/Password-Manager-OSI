@@ -177,3 +177,7 @@ Dieses Projekt ist Open Source und steht unter der MIT-Lizenz zur Verfügung.
 ## 🤝 Beitragen
 
 Verbesserungen und Bugfixes sind willkommen! Einfach einen Pull Request erstellen.
+
+## Informations
+
+This Project was created with Claude AI!
