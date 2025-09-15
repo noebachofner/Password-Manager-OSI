@@ -47,22 +47,116 @@ public class VaultManager {
             this.currentVaultFile = vaultFile;
 
             // Lade und entschlüssele Vault-Daten
-            String encryptedData = readFileContent(vaultFile);
+            String fileContent = readFileContent(vaultFile);
 
-            if (encryptedData.trim().isEmpty()) {
+            // Debug-Ausgabe
+            System.out.println("Gelesener Dateiinhalt (erste 100 Zeichen): " +
+                    fileContent.substring(0, Math.min(100, fileContent.length())));
+
+            if (fileContent.trim().isEmpty()) {
                 // Leere Datei - neuer Tresor
                 this.passwords.clear();
                 return true;
             }
 
-            String decryptedData = encryptionManager.decrypt(encryptedData);
+            // Bereinige den Dateiinhalt (entferne Whitespace und Zeilenumbrüche)
+            String cleanedContent = cleanBase64Content(fileContent);
+
+            if (cleanedContent.isEmpty()) {
+                // Nach Bereinigung leer - behandle als neuen Tresor
+                this.passwords.clear();
+                return true;
+            }
+
+            // Validiere Base64-Format
+            if (!isValidBase64(cleanedContent)) {
+                throw new IllegalArgumentException("Ungültiges Base64-Format in Vault-Datei");
+            }
+
+            String decryptedData = encryptionManager.decrypt(cleanedContent);
             parsePasswordData(decryptedData);
 
             return true;
 
         } catch (Exception e) {
             System.err.println("Fehler beim Laden des Tresors: " + e.getMessage());
+            e.printStackTrace();
+
+            // Versuche Recovery-Modus
+            return attemptVaultRecovery(vaultFile, masterPassword);
+        }
+    }
+
+    /**
+     * Versucht eine beschädigte Vault-Datei wiederherzustellen
+     */
+    private boolean attemptVaultRecovery(File vaultFile, String masterPassword) {
+        try {
+            System.out.println("Versuche Vault-Recovery...");
+
+            // Backup der originalen Datei erstellen
+            File backupFile = new File(vaultFile.getAbsolutePath() + ".backup");
+            if (!backupFile.exists()) {
+                copyFile(vaultFile, backupFile);
+                System.out.println("Backup erstellt: " + backupFile.getAbsolutePath());
+            }
+
+            // Initialisiere als leeren Tresor
+            this.passwords.clear();
+
+            // Frage Benutzer ob neuer Tresor erstellt werden soll
+            System.out.println("Vault-Datei konnte nicht gelesen werden. Erstelle neuen leeren Tresor.");
+
+            return true;
+
+        } catch (Exception e) {
+            System.err.println("Recovery fehlgeschlagen: " + e.getMessage());
             return false;
+        }
+    }
+
+    /**
+     * Bereinigt Base64-Content von ungültigen Zeichen
+     */
+    private String cleanBase64Content(String content) {
+        if (content == null) return "";
+
+        // Entferne alle Whitespace-Zeichen
+        String cleaned = content.replaceAll("\\s+", "");
+
+        // Entferne ungültige Base64-Zeichen (behalte nur A-Z, a-z, 0-9, +, /, =)
+        cleaned = cleaned.replaceAll("[^A-Za-z0-9+/=]", "");
+
+        return cleaned;
+    }
+
+    /**
+     * Überprüft ob ein String gültiges Base64-Format hat
+     */
+    private boolean isValidBase64(String content) {
+        if (content == null || content.isEmpty()) return false;
+
+        // Base64-String sollte nur gültige Zeichen enthalten
+        if (!content.matches("^[A-Za-z0-9+/]*={0,2}$")) {
+            return false;
+        }
+
+        // Länge sollte ein Vielfaches von 4 sein
+        return content.length() % 4 == 0;
+    }
+
+    /**
+     * Kopiert eine Datei
+     */
+    private void copyFile(File source, File dest) throws IOException {
+        try (FileInputStream fis = new FileInputStream(source);
+             FileOutputStream fos = new FileOutputStream(dest)) {
+
+            byte[] buffer = new byte[1024];
+            int length;
+            while ((length = fis.read(buffer)) > 0) {
+                fos.write(buffer, 0, length);
+            }
         }
     }
 
@@ -79,11 +173,19 @@ public class VaultManager {
             String serializedData = serializePasswordData();
             String encryptedData = encryptionManager.encrypt(serializedData);
 
+            // Validiere das verschlüsselte Ergebnis
+            if (!isValidBase64(encryptedData)) {
+                throw new IllegalStateException("Verschlüsselung erzeugte ungültiges Base64");
+            }
+
             writeFileContent(currentVaultFile, encryptedData);
+
+            System.out.println("Vault erfolgreich gespeichert: " + currentVaultFile.getAbsolutePath());
             return true;
 
         } catch (Exception e) {
             System.err.println("Fehler beim Speichern des Tresors: " + e.getMessage());
+            e.printStackTrace();
             return false;
         }
     }
@@ -211,6 +313,11 @@ public class VaultManager {
      */
     private void parsePasswordData(String data) {
         passwords.clear();
+
+        if (data == null || data.trim().isEmpty()) {
+            return;
+        }
+
         String[] lines = data.split("\n");
 
         for (String line : lines) {
@@ -218,13 +325,18 @@ public class VaultManager {
 
             String[] parts = line.split("\\|");
             if (parts.length >= 5) {
-                PasswordEntry entry = new PasswordEntry();
-                entry.setTitle(unescapeString(parts[0]));
-                entry.setUsername(unescapeString(parts[1]));
-                entry.setPassword(unescapeString(parts[2]));
-                entry.setWebsite(unescapeString(parts[3]));
-                entry.setCreated(new Date(Long.parseLong(parts[4])));
-                passwords.add(entry);
+                try {
+                    PasswordEntry entry = new PasswordEntry();
+                    entry.setTitle(unescapeString(parts[0]));
+                    entry.setUsername(unescapeString(parts[1]));
+                    entry.setPassword(unescapeString(parts[2]));
+                    entry.setWebsite(unescapeString(parts[3]));
+                    entry.setCreated(new Date(Long.parseLong(parts[4])));
+                    passwords.add(entry);
+                } catch (Exception e) {
+                    System.err.println("Fehler beim Parsen einer Passwort-Zeile: " + e.getMessage());
+                    // Überspringe beschädigte Einträge
+                }
             }
         }
     }
@@ -233,12 +345,14 @@ public class VaultManager {
      * Liest den Inhalt einer Datei
      */
     private String readFileContent(File file) throws IOException {
-        try (BufferedReader reader = new BufferedReader(new FileReader(file))) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(new FileInputStream(file), "UTF-8"))) {
             StringBuilder content = new StringBuilder();
             String line;
 
             while ((line = reader.readLine()) != null) {
-                content.append(line).append("\n");
+                content.append(line);
+                // Keine Zeilenumbrüche hinzufügen für Base64-Content
             }
 
             return content.toString();
@@ -249,7 +363,8 @@ public class VaultManager {
      * Schreibt Inhalt in eine Datei
      */
     private void writeFileContent(File file, String content) throws IOException {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(file))) {
+        try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(new FileOutputStream(file), "UTF-8"))) {
             writer.write(content);
         }
     }
@@ -268,5 +383,25 @@ public class VaultManager {
     private String unescapeString(String input) {
         if (input == null) return "";
         return input.replace("\\|", "|").replace("\\n", "\n");
+    }
+
+    /**
+     * Repariert eine beschädigte Vault-Datei
+     */
+    public boolean repairVault(File vaultFile, String masterPassword) {
+        try {
+            System.out.println("Starte Vault-Reparatur...");
+
+            // Backup erstellen
+            File backupFile = new File(vaultFile.getAbsolutePath() + ".repair-backup");
+            copyFile(vaultFile, backupFile);
+
+            // Neue leere Vault erstellen
+            return createNewVault(vaultFile, masterPassword);
+
+        } catch (Exception e) {
+            System.err.println("Vault-Reparatur fehlgeschlagen: " + e.getMessage());
+            return false;
+        }
     }
 }
